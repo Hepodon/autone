@@ -227,6 +227,7 @@ void ballmangement() {
     } else {
       top.brake();
     }
+    delay(10);
   }
 }
 
@@ -251,11 +252,11 @@ void autonomous() {
       break;
 
     for (int ii = 0; ii < 9; ii++) {
-      c::motor_move_velocity(wheels[ii], replay[i].wheels[ii]);
+      c::motor_move_voltage(wheels[ii], replay[i].wheels[ii]);
     }
+    c::motor_move_voltage(PRONG_PORT, replay[i].prong);
 
-    c::motor_move_velocity(PRONG_PORT, replay[i].prong);
-    delay(2);
+    delay(10);
   }
 
   free(replay);
@@ -263,31 +264,51 @@ void autonomous() {
 
 void opcontrol() {
   Task balls(ballmangement);
-
   bool recording = false;
+  bool recorded = false;
   int replay_step = 0;
   ReplayStep *replay = (ReplayStep *)malloc(sizeof(ReplayStep) * 30000);
 
   while (true) {
+
+    // Start recording when X pressed
+    if (userInput.get_digital_new_press(DIGITAL_X)) {
+      recording = true;
+      replay_step = 0;
+      recorded = false;
+    }
+
+    // Stop recording when B pressed
+    if (recording && userInput.get_digital_new_press(DIGITAL_B)) {
+      replay[replay_step].last = 1;
+      write_replay(replay, replay_step + 1, "/usd/rec");
+      recording = false;
+      recorded = true;
+    }
+
     if (recording) {
       for (int i = 0; i < 9; i++) {
-        replay[replay_step].wheels[i] = c::motor_get_actual_velocity(wheels[i]);
+        replay[replay_step].wheels[i] = c::motor_get_voltage(wheels[i]);
       }
-      replay[replay_step].prong = c::motor_get_actual_velocity(PRONG_PORT);
+      replay[replay_step].prong = c::motor_get_voltage(PRONG_PORT);
       replay[replay_step].last = 0;
 
       replay_step++;
 
-      if (replay_step >= 30000) {
-        replay_step--;
+      if (replay_step >= 29999) {
         replay[replay_step].last = 1;
         write_replay(replay, replay_step + 1, "/usd/rec");
         recording = false;
+        recorded = true;
       }
     }
-    int fwdpwr = userInput.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
-    int trnpwr = userInput.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) * 0.6;
+
+    // Driving
+    int fwdpwr = userInput.get_analog(ANALOG_LEFT_Y);
+    int trnpwr = userInput.get_analog(ANALOG_RIGHT_X) * 0.6;
     aleft.move(fwdpwr + trnpwr);
     aright.move(fwdpwr - trnpwr);
+
+    delay(10);
   }
 }
