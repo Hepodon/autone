@@ -1,4 +1,5 @@
 #include "main.h"
+#include "pros/adi.hpp"
 #include "pros/misc.h"
 #include "pros/motor_group.hpp"
 #include "pros/motors.h"
@@ -13,6 +14,7 @@ using namespace pros;
 typedef struct {
   int32_t wheels[9];
   double prong;
+  uint32_t dt;
   uint8_t last;
 } ReplayStep;
 
@@ -57,6 +59,8 @@ Motor middle(3);
 Motor top(4);
 
 Controller userInput(E_CONTROLLER_MASTER);
+
+adi::Pneumatics match('a', false);
 
 IMU i1(15);
 // IMU i2(9);
@@ -217,11 +221,9 @@ void ballmangement() {
       middle.brake();
     }
     if (userInput.get_digital(DIGITAL_L2)) {
-      if (userInput.get_digital(DIGITAL_L1)) {
-        top.move(127);
-      } else {
-        top.move(-127);
-      }
+      top.move(-127);
+    } else if ((userInput.get_digital(DIGITAL_L1))) {
+      top.move(127);
     } else if (userInput.get_digital(DIGITAL_R1)) {
       top.move(-127);
     } else {
@@ -231,7 +233,7 @@ void ballmangement() {
   }
 }
 
-#define PRONG_PORT 10
+#define PRONG_PORT 11
 
 uint8_t wheels[9] = {7, 5, 10, 19, 21, 6, 18, 3, 4};
 
@@ -256,7 +258,7 @@ void autonomous() {
     }
     c::motor_move_voltage(PRONG_PORT, replay[i].prong);
 
-    delay(10);
+    delay(replay[i].dt); // <<--- EXACT TIMING
   }
 
   free(replay);
@@ -269,6 +271,7 @@ void opcontrol() {
   int replay_step = 0;
   ReplayStep *replay = (ReplayStep *)malloc(sizeof(ReplayStep) * 30000);
 
+  uint32_t lastTime = millis();
   while (true) {
 
     // Start recording when X pressed
@@ -276,6 +279,7 @@ void opcontrol() {
       recording = true;
       replay_step = 0;
       recorded = false;
+      lastTime = millis(); // reset frame timer   <<---
     }
 
     // Stop recording when B pressed
@@ -287,6 +291,11 @@ void opcontrol() {
     }
 
     if (recording) {
+
+      uint32_t now = pros::millis();
+      replay[replay_step].dt = now - lastTime; // <<--- ADDED
+      lastTime = now;                          // <<--- ADDED
+
       for (int i = 0; i < 9; i++) {
         replay[replay_step].wheels[i] = c::motor_get_voltage(wheels[i]);
       }
@@ -295,20 +304,17 @@ void opcontrol() {
 
       replay_step++;
 
-      if (replay_step >= 29999) {
-        replay[replay_step].last = 1;
-        write_replay(replay, replay_step + 1, "/usd/rec");
-        recording = false;
-        recorded = true;
+      if (userInput.get_digital_new_press(DIGITAL_A)) {
+        match.toggle();
       }
+
+      // Driving
+      int fwdpwr = userInput.get_analog(ANALOG_LEFT_Y);
+      int trnpwr = userInput.get_analog(ANALOG_RIGHT_X) * 0.6;
+      aleft.move(fwdpwr + trnpwr);
+      aright.move(fwdpwr - trnpwr);
+
+      delay(10);
     }
-
-    // Driving
-    int fwdpwr = userInput.get_analog(ANALOG_LEFT_Y);
-    int trnpwr = userInput.get_analog(ANALOG_RIGHT_X) * 0.6;
-    aleft.move(fwdpwr + trnpwr);
-    aright.move(fwdpwr - trnpwr);
-
-    delay(10);
   }
 }
