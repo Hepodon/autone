@@ -9,17 +9,13 @@
 
 using namespace pros;
 
-/* =========================
-   CONFIG
-   ========================= */
 
-constexpr bool USE_IMU_CORRECTION = false; // <<<<<< TOGGLE IMU HERE
-constexpr float HEADING_kP = 2.5;          // IMU correction strength
+
+constexpr bool USE_IMU_CORRECTION = false; 
+constexpr float HEADING_kP = 2.5;          
 constexpr int MAX_REPLAY_STEPS = 30000;
 
-/* =========================
-   HARDWARE
-   ========================= */
+
 
 MotorGroup aright({-7, 5, 10});
 MotorGroup aleft({19, -21, -6});
@@ -33,9 +29,7 @@ adi::Pneumatics match('a', false);
 
 IMU i1(15);
 
-/* =========================
-   REPLAY STRUCT
-   ========================= */
+
 
 typedef struct {
   int16_t fwd;
@@ -50,9 +44,6 @@ typedef struct {
   uint8_t last;
 } ReplayStep;
 
-/* =========================
-   FILE IO
-   ========================= */
 
 inline void write_replay(ReplayStep *steps, int count, const char *filename) {
   FILE *f = fopen(filename, "wb");
@@ -81,9 +72,7 @@ inline ReplayStep *read_replay(const char *filename, int *outCount) {
   return data;
 }
 
-/* =========================
-   APPLY REPLAY STEP
-   ========================= */
+
 
 void apply_step(const ReplayStep *s) {
   float left = s->fwd + s->trn;
@@ -117,9 +106,7 @@ void apply_step(const ReplayStep *s) {
   top.move(s->top);
 }
 
-/* =========================
-   BALL TASK
-   ========================= */
+
 
 void ballTask() {
   while (true) {
@@ -127,32 +114,34 @@ void ballTask() {
                 : userInput.get_digital(DIGITAL_R1) ? 127
                                                     : 0);
 
-    middle.move(userInput.get_digital(DIGITAL_L2)   ? -127.
-                : userInput.get_digital(DIGITAL_L1) ? 127
+    middle.move(userInput.get_digital(DIGITAL_L2) ||
+                        userInput.get_digital(DIGITAL_L1)
+                    ? -127.
+                : userInput.get_digital(DIGITAL_R1) ? 127
                                                     : 0);
 
-    top.move(userInput.get_digital(DIGITAL_L1)   ? 127
-             : userInput.get_digital(DIGITAL_L2) ? -127
-                                                 : 0);
+    top.move(userInput.get_digital(DIGITAL_L1) ? 127
+             : userInput.get_digital(DIGITAL_R1) ||
+                     userInput.get_digital(DIGITAL_L2)
+                 ? -127
+                 : 0);
 
     delay(10);
   }
 }
 
-/* =========================
-   INIT
-   ========================= */
+
 
 void initialize() {
-  i1.reset();
-  delay(300);
+  if (USE_IMU_CORRECTION)
+    i1.reset(true);
 }
 
-/* =========================
-   AUTONOMOUS (REPLAY)
-   ========================= */
+
 
 void autonomous() {
+  if (USE_IMU_CORRECTION)
+    i1.reset(true);
   int count = 0;
   ReplayStep *replay = read_replay("/usd/rec", &count);
   if (!replay)
@@ -172,9 +161,7 @@ void autonomous() {
   free(replay);
 }
 
-/* =========================
-   DRIVER CONTROL + RECORD
-   ========================= */
+
 
 void opcontrol() {
   Task balls(ballTask);
