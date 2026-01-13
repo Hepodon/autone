@@ -15,6 +15,9 @@
 
 using namespace pros;
 
+// ============================================================================
+// HARDWARE CONFIGURATION
+// ============================================================================
 MotorGroup aright({-7, 5, 10});
 MotorGroup aleft({19, -21, -6});
 Motor intake(18);
@@ -24,38 +27,49 @@ Motor top(4);
 Controller userInput(E_CONTROLLER_MASTER);
 adi::Pneumatics match('a', false);
 
-IMU inertial1(11);
-IMU inertial2(20);
-GPS gps(12);
-Rotation leftEncoder(13);
-Rotation rightEncoder(14);
+// Sensors (configure ports as needed)
+IMU inertial1(11);         // Primary IMU
+IMU inertial2(20);         // Secondary IMU
+GPS gps(12);               // GPS port (in INCHES mode)
+Rotation leftEncoder(13);  // Left tracking wheel
+Rotation rightEncoder(14); // Right tracking wheel
 
+// ============================================================================
+// CONFIGURATION FLAGS
+// ============================================================================
 struct SensorConfig {
   bool useGPS = true;
   bool useEncoders = true;
   bool useIMU = true;
-  bool useMCL = false;
-  bool gpsForCorrection = true;
+  bool useMCL = false;          // Monte Carlo Localization
+  bool gpsForCorrection = true; // true = correction, false = logging only
 };
 
 SensorConfig sensorConfig;
 
-constexpr double WHEEL_DIAMETER = 2.75;
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+constexpr double WHEEL_DIAMETER = 2.75; // inches
 constexpr double WHEEL_CIRCUMFERENCE = WHEEL_DIAMETER * M_PI;
-constexpr double TRACK_WIDTH = 12.0;
-constexpr double LOOKAHEAD_DISTANCE = 12.0;
+constexpr double TRACK_WIDTH = 12.0;        // inches between wheels
+constexpr double LOOKAHEAD_DISTANCE = 12.0; // inches
 constexpr int MAX_WAYPOINTS = 5000;
-constexpr uint32_t RECORD_INTERVAL_MS = 50;
+constexpr uint32_t RECORD_INTERVAL_MS = 50; // Record every 50ms
 
+// MCL Constants
 constexpr int NUM_PARTICLES = 500;
-constexpr double FIELD_WIDTH = 144.0;
-constexpr double FIELD_HEIGHT = 144.0;
+constexpr double FIELD_WIDTH = 144.0;  // 12 feet in inches
+constexpr double FIELD_HEIGHT = 144.0; // 12 feet in inches
 
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
 struct Pose {
-  double x;
-  double y;
-  double theta;
-  uint32_t timestamp;
+  double x;           // inches
+  double y;           // inches
+  double theta;       // radians
+  uint32_t timestamp; // milliseconds
 };
 
 struct Waypoint {
@@ -67,6 +81,17 @@ struct Waypoint {
   int16_t middle_cmd;
   int16_t top_cmd;
 };
+
+// ============================================================================
+// MONTE CARLO LOCALIZATION (GPS + IMU + Odometry Fusion)
+// ============================================================================
+// MCL without distance sensors works by:
+// 1. Using GPS as absolute position measurements (when available)
+// 2. Using IMU as absolute heading measurements
+// 3. Using odometry for motion prediction between GPS updates
+// 4. Filtering out bad GPS readings via particle consensus
+// 5. Handling GPS dropouts gracefully by relying on odometry
+// 6. AUTOMATICALLY adjusting sensor trust based on consistency
 
 struct Particle {
   double x;
@@ -82,18 +107,33 @@ private:
   uint32_t lastGPSUpdateTime;
   bool gpsAvailable;
 
-  double motionNoiseX = 0.5;
-  double motionNoiseY = 0.5;
-  double motionNoiseTheta = 0.05;
-  double sensorNoiseGPS = 3.0;
-  double sensorNoiseIMU = 0.08;
+  // Base noise parameters (starting point)
+  double baseMotionNoiseX = 0.5;
+  double baseMotionNoiseY = 0.5;
+  double baseMotionNoiseTheta = 0.05;
+  double baseSensorNoiseGPS = 3.0;
+  double baseSensorNoiseIMU = 0.08;
 
+  // ADAPTIVE noise (automatically adjusted based on sensor performance)
+  double adaptiveMotionNoiseX = 0.5;
+  double adaptiveMotionNoiseY = 0.5;
+  double adaptiveSensorNoiseGPS = 3.0;
+  double adaptiveSensorNoiseIMU = 0.08;
+
+  // Sensor consistency tracking
+  std::vector<double> recentGPSErrors;
+  std::vector<double> recentIMUErrors;
+  const int ERROR_HISTORY_SIZE = 20;
+
+  // Adaptive noise (increases when GPS unavailable)
   double currentMotionNoise = 1.0;
 
 public:
   MonteCarloLocalizer()
       : rng(std::random_device{}()), lastGPSUpdateTime(0), gpsAvailable(false) {
     particles.resize(NUM_PARTICLES);
+    recentGPSErrors.reserve(ERROR_HISTORY_SIZE);
+    recentIMUErrors.reserve(ERROR_HISTORY_SIZE);
   }
 
   void initialize(double x, double y, double theta, double spread = 6.0) {
@@ -110,21 +150,95 @@ public:
 
     lastGPSUpdateTime = millis();
     gpsAvailable = false;
+
+    // Reset adaptive parameters
+    adaptiveMotionNoiseX = baseMotionNoiseX;
+    adaptiveMotionNoiseY = baseMotionNoiseY;
+    adaptiveSensorNoiseGPS = baseSensorNoiseGPS;
+    adaptiveSensorNoiseIMU = baseSensorNoiseIMU;
+    recentGPSErrors.clear();
+    recentIMUErrors.clear();
+  }
+
+  // Automatically adjust sensor noise based on recent consistency
+  void updateAdaptiveNoise() {
+    // GPS noise adjustment
+    if (recentGPSErrors.size() >= 5) {
+      double avgError = 0;
+      for (double err : recentGPSErrors) {
+        avgError += err;
+      }
+      avgError /= recentGPSErrors.size();
+
+      // If GPS consistently has low error, trust it more (lower noise)
+      // If GPS has high error, trust it less (higher noise)
+      adaptiveSensorNoiseGPS = baseSensorNoiseGPS * (0.5 + avgError / 6.0);
+
+      // Clamp between reasonable bounds
+      adaptiveSensorNoiseGPS =
+          std::max(1.0, std::min(10.0, adaptiveSensorNoiseGPS));
+    }
+
+    // IMU noise adjustment
+    if (recentIMUErrors.size() >= 5) {
+      double avgError = 0;
+      for (double err : recentIMUErrors) {
+        avgError += err;
+      }
+      avgError /= recentIMUErrors.size();
+
+      // Adjust IMU trust based on consistency
+      adaptiveSensorNoiseIMU = baseSensorNoiseIMU * (0.5 + avgError / 0.2);
+      adaptiveSensorNoiseIMU =
+          std::max(0.03, std::min(0.3, adaptiveSensorNoiseIMU));
+    }
+
+    // Motion noise adjustment based on particle spread
+    double spreadX = 0, spreadY = 0;
+    Pose estimate = getEstimate();
+
+    for (const auto &p : particles) {
+      spreadX += pow(p.x - estimate.x, 2) * p.weight;
+      spreadY += pow(p.y - estimate.y, 2) * p.weight;
+    }
+
+    spreadX = sqrt(spreadX);
+    spreadY = sqrt(spreadY);
+
+    // If particles spread a lot, odometry might be drifting - increase motion
+    // noise
+    if (spreadX > 5.0) {
+      adaptiveMotionNoiseX = baseMotionNoiseX * 1.5;
+    } else if (spreadX < 2.0) {
+      adaptiveMotionNoiseX = baseMotionNoiseX * 0.8;
+    }
+
+    if (spreadY > 5.0) {
+      adaptiveMotionNoiseY = baseMotionNoiseY * 1.5;
+    } else if (spreadY < 2.0) {
+      adaptiveMotionNoiseY = baseMotionNoiseY * 0.8;
+    }
   }
 
   void predict(double deltaX, double deltaY, double deltaTheta) {
+    // Increase uncertainty if GPS has been unavailable for a while
     uint32_t timeSinceGPS = millis() - lastGPSUpdateTime;
     if (timeSinceGPS > 2000) {
+      // After 2 seconds without GPS, increase motion noise
       currentMotionNoise = 1.0 + (timeSinceGPS / 1000.0) * 0.5;
     } else {
       currentMotionNoise = 1.0;
     }
 
-    std::normal_distribution<> noiseX(0, motionNoiseX * currentMotionNoise);
-    std::normal_distribution<> noiseY(0, motionNoiseY * currentMotionNoise);
-    std::normal_distribution<> noiseTheta(0, motionNoiseTheta);
+    // Use adaptive noise values
+    std::normal_distribution<> noiseX(0, adaptiveMotionNoiseX *
+                                             currentMotionNoise);
+    std::normal_distribution<> noiseY(0, adaptiveMotionNoiseY *
+                                             currentMotionNoise);
+    std::normal_distribution<> noiseTheta(0, baseMotionNoiseTheta);
 
     for (auto &p : particles) {
+      // Apply motion model with noise
       double cos_theta = cos(p.theta);
       double sin_theta = sin(p.theta);
 
@@ -132,9 +246,11 @@ public:
       p.y += deltaX * sin_theta + deltaY * cos_theta + noiseY(rng);
       p.theta += deltaTheta + noiseTheta(rng);
 
+      // Keep particles on field
       p.x = std::max(0.0, std::min(FIELD_WIDTH, p.x));
       p.y = std::max(0.0, std::min(FIELD_HEIGHT, p.y));
 
+      // Normalize theta
       while (p.theta > M_PI)
         p.theta -= 2 * M_PI;
       while (p.theta < -M_PI)
@@ -144,43 +260,59 @@ public:
 
   void update(double gpsX, double gpsY, double imuTheta, bool hasGPS,
               bool hasIMU) {
+    // Update particle weights based on sensor measurements
     double totalWeight = 0.0;
     bool validGPS = (hasGPS && gpsX != PROS_ERR_F && gpsY != PROS_ERR_F);
     bool validIMU = (hasIMU && imuTheta != PROS_ERR_F);
 
+    // Track GPS availability
     if (validGPS) {
       lastGPSUpdateTime = millis();
       gpsAvailable = true;
     }
 
+    // Get particle consensus for outlier detection
     double meanX = 0, meanY = 0;
+    for (const auto &p : particles) {
+      meanX += p.x / NUM_PARTICLES;
+      meanY += p.y / NUM_PARTICLES;
+    }
+
+    // Outlier detection for GPS (reject if too far from particle consensus)
+    double distFromConsensus = 0;
     if (validGPS) {
-      for (const auto &p : particles) {
-        meanX += p.x / NUM_PARTICLES;
-        meanY += p.y / NUM_PARTICLES;
-      }
+      distFromConsensus = sqrt(pow(gpsX - meanX, 2) + pow(gpsY - meanY, 2));
 
-      double distFromConsensus =
-          sqrt(pow(gpsX - meanX, 2) + pow(gpsY - meanY, 2));
-
+      // If GPS reading is more than 24 inches from consensus, it's probably bad
       if (distFromConsensus > 24.0 && gpsAvailable) {
-        validGPS = false;
-        userInput.print(2, 0, "GPS outlier!");
+        validGPS = false; // Reject this GPS reading
+      }
+    }
+
+    // Track sensor errors for adaptive learning
+    if (validGPS) {
+      // Store GPS error (how far it was from consensus)
+      recentGPSErrors.push_back(distFromConsensus);
+      if (recentGPSErrors.size() > ERROR_HISTORY_SIZE) {
+        recentGPSErrors.erase(recentGPSErrors.begin());
       }
     }
 
     for (auto &p : particles) {
       double weight = 1.0;
 
+      // GPS measurement model (absolute position) - uses ADAPTIVE noise
       if (validGPS) {
         double dx = p.x - gpsX;
         double dy = p.y - gpsY;
         double distError = sqrt(dx * dx + dy * dy);
 
-        weight *=
-            exp(-distError * distError / (2 * sensorNoiseGPS * sensorNoiseGPS));
+        // Gaussian probability - uses adaptive sensor noise
+        weight *= exp(-distError * distError /
+                      (2 * adaptiveSensorNoiseGPS * adaptiveSensorNoiseGPS));
       }
 
+      // IMU measurement model (absolute heading) - uses ADAPTIVE noise
       if (validIMU) {
         double thetaError = p.theta - imuTheta;
         while (thetaError > M_PI)
@@ -188,10 +320,20 @@ public:
         while (thetaError < -M_PI)
           thetaError += 2 * M_PI;
 
+        // Track IMU consistency
+        if (recentIMUErrors.size() < ERROR_HISTORY_SIZE) {
+          recentIMUErrors.push_back(std::abs(thetaError));
+          if (recentIMUErrors.size() > ERROR_HISTORY_SIZE) {
+            recentIMUErrors.erase(recentIMUErrors.begin());
+          }
+        }
+
+        // Gaussian probability - uses adaptive sensor noise
         weight *= exp(-thetaError * thetaError /
-                      (2 * sensorNoiseIMU * sensorNoiseIMU));
+                      (2 * adaptiveSensorNoiseIMU * adaptiveSensorNoiseIMU));
       }
 
+      // If no sensors available, all particles keep equal weight
       if (!validGPS && !validIMU) {
         weight = 1.0;
       }
@@ -200,21 +342,29 @@ public:
       totalWeight += weight;
     }
 
+    // Normalize weights
     if (totalWeight > 0) {
       for (auto &p : particles) {
         p.weight /= totalWeight;
       }
     } else {
+      // If all weights are zero (shouldn't happen), reset to uniform
       for (auto &p : particles) {
         p.weight = 1.0 / NUM_PARTICLES;
       }
     }
 
+    // Update adaptive noise parameters based on recent performance
+    updateAdaptiveNoise();
+
+    // Resample if effective sample size is low
     double nEff = 0.0;
     for (const auto &p : particles) {
       nEff += p.weight * p.weight;
     }
     nEff = 1.0 / nEff;
+
+    // Resample more aggressively when we have good sensor data
     double resampleThreshold =
         (validGPS || validIMU) ? NUM_PARTICLES / 2.0 : NUM_PARTICLES / 4.0;
 
@@ -227,6 +377,7 @@ public:
     std::vector<Particle> newParticles;
     newParticles.reserve(NUM_PARTICLES);
 
+    // Low variance resampling
     std::uniform_real_distribution<> dist(0.0, 1.0 / NUM_PARTICLES);
     double r = dist(rng);
     double c = particles[0].weight;
@@ -246,6 +397,7 @@ public:
   }
 
   Pose getEstimate() const {
+    // Weighted average of particles
     double x = 0, y = 0;
     double sinTheta = 0, cosTheta = 0;
 
@@ -259,6 +411,7 @@ public:
     return {x, y, atan2(sinTheta, cosTheta), millis()};
   }
 
+  // Get particle spread (uncertainty measure)
   double getUncertainty() const {
     Pose mean = getEstimate();
     double variance = 0;
@@ -269,52 +422,74 @@ public:
       variance += (dx * dx + dy * dy) * p.weight;
     }
 
-    return sqrt(variance);
+    return sqrt(variance); // Standard deviation in inches
   }
 
-  bool isConverged() const { return getUncertainty() < 3.0; }
+  bool isConverged() const {
+    return getUncertainty() < 3.0; // Converged if uncertainty < 3 inches
+  }
 
   bool hasGPSSignal() const {
     return gpsAvailable && (millis() - lastGPSUpdateTime < 1000);
   }
 
+  // Get current adaptive noise values for debugging/display
+  double getAdaptiveGPSNoise() const { return adaptiveSensorNoiseGPS; }
+  double getAdaptiveIMUNoise() const { return adaptiveSensorNoiseIMU; }
+  double getAdaptiveMotionNoiseX() const { return adaptiveMotionNoiseX; }
+  double getAdaptiveMotionNoiseY() const { return adaptiveMotionNoiseY; }
+
+  // Load/save noise parameters (optional - only if you want to persist learned
+  // values)
   void saveTrainingData(const char *filename) {
     FILE *f = fopen(filename, "w");
     if (!f)
       return;
 
-    fprintf(f, "motionNoiseX: %.4f\n", motionNoiseX);
-    fprintf(f, "motionNoiseY: %.4f\n", motionNoiseY);
-    fprintf(f, "motionNoiseTheta: %.4f\n", motionNoiseTheta);
-    fprintf(f, "sensorNoiseGPS: %.4f\n", sensorNoiseGPS);
-    fprintf(f, "sensorNoiseIMU: %.4f\n", sensorNoiseIMU);
+    fprintf(f, "motionNoiseX: %.4f\n", baseMotionNoiseX);
+    fprintf(f, "motionNoiseY: %.4f\n", baseMotionNoiseY);
+    fprintf(f, "motionNoiseTheta: %.4f\n", baseMotionNoiseTheta);
+    fprintf(f, "sensorNoiseGPS: %.4f\n", baseSensorNoiseGPS);
+    fprintf(f, "sensorNoiseIMU: %.4f\n", baseSensorNoiseIMU);
 
     fclose(f);
   }
 
   void loadTrainingData(const char *filename) {
     FILE *f = fopen(filename, "r");
-    if (!f)
+    if (!f) {
+      // No saved params, use current defaults
       return;
+    }
 
-    fscanf(f, "motionNoiseX: %lf\n", &motionNoiseX);
-    fscanf(f, "motionNoiseY: %lf\n", &motionNoiseY);
-    fscanf(f, "motionNoiseTheta: %lf\n", &motionNoiseTheta);
-    fscanf(f, "sensorNoiseGPS: %lf\n", &sensorNoiseGPS);
-    fscanf(f, "sensorNoiseIMU: %lf\n", &sensorNoiseIMU);
+    fscanf(f, "motionNoiseX: %lf\n", &baseMotionNoiseX);
+    fscanf(f, "motionNoiseY: %lf\n", &baseMotionNoiseY);
+    fscanf(f, "motionNoiseTheta: %lf\n", &baseMotionNoiseTheta);
+    fscanf(f, "sensorNoiseGPS: %lf\n", &baseSensorNoiseGPS);
+    fscanf(f, "sensorNoiseIMU: %lf\n", &baseSensorNoiseIMU);
 
     fclose(f);
+
+    // Initialize adaptive values to base values
+    adaptiveMotionNoiseX = baseMotionNoiseX;
+    adaptiveMotionNoiseY = baseMotionNoiseY;
+    adaptiveSensorNoiseGPS = baseSensorNoiseGPS;
+    adaptiveSensorNoiseIMU = baseSensorNoiseIMU;
   }
 };
 
 MonteCarloLocalizer mcl;
 
+// ============================================================================
+// ODOMETRY CLASS
+// ============================================================================
 class Odometry {
 private:
   Pose pose;
   double lastLeftPos;
   double lastRightPos;
 
+  // Dual IMU fusion
   double getAveragedHeading() {
     if (!sensorConfig.useIMU)
       return pose.theta;
@@ -322,17 +497,20 @@ private:
     double heading1 = inertial1.get_heading();
     double heading2 = inertial2.get_heading();
 
+    // Check if both IMUs are valid
     if (heading1 == PROS_ERR_F && heading2 == PROS_ERR_F) {
-      return pose.theta;
+      return pose.theta; // Keep previous
     } else if (heading1 == PROS_ERR_F) {
       return heading2 * M_PI / 180.0;
     } else if (heading2 == PROS_ERR_F) {
       return heading1 * M_PI / 180.0;
     }
 
+    // Average both IMUs (convert to radians)
     heading1 = heading1 * M_PI / 180.0;
     heading2 = heading2 * M_PI / 180.0;
 
+    // Handle angle wrapping
     double diff = heading2 - heading1;
     while (diff > M_PI)
       diff -= 2 * M_PI;
@@ -361,10 +539,12 @@ public:
     double deltaX = 0, deltaY = 0, deltaTheta = 0;
     double currentTheta = pose.theta;
 
+    // Update heading from dual IMU if enabled
     if (sensorConfig.useIMU) {
       currentTheta = getAveragedHeading();
     }
 
+    // Update position from encoders if enabled (in INCHES)
     if (sensorConfig.useEncoders) {
       double leftPos = leftEncoder.get_position() / 100.0 * WHEEL_CIRCUMFERENCE;
       double rightPos =
@@ -392,24 +572,32 @@ public:
       lastRightPos = rightPos;
     }
 
+    // Monte Carlo Localization
     if (sensorConfig.useMCL) {
+      // Predict step
       mcl.predict(deltaX, deltaY, deltaTheta);
 
+      // Update with sensor measurements
       gps_status_s_t gpsStatus = gps.get_position_and_orientation();
-      double gpsX = gpsStatus.x;
-      double gpsY = gpsStatus.y;
+      double gpsX =
+          gpsStatus.x; // Already in inches if GPS configured correctly
+      double gpsY = gpsStatus.y; // Already in inches
       double imuTheta = currentTheta;
 
       mcl.update(gpsX, gpsY, imuTheta, sensorConfig.useGPS,
                  sensorConfig.useIMU);
 
+      // Get MCL estimate
       Pose mclEstimate = mcl.getEstimate();
       pose.x = mclEstimate.x;
       pose.y = mclEstimate.y;
       pose.theta = mclEstimate.theta;
-    } else if (sensorConfig.useGPS && sensorConfig.gpsForCorrection) {
+    }
+    // GPS correction if enabled (and not using MCL)
+    else if (sensorConfig.useGPS && sensorConfig.gpsForCorrection) {
       gps_status_s_t status = gps.get_position_and_orientation();
       if (status.x != PROS_ERR_F && status.y != PROS_ERR_F) {
+        // GPS should already be in inches - verify configuration!
         double gpsX = status.x;
         double gpsY = status.y;
         pose.x = pose.x * 0.9 + gpsX * 0.1;
@@ -423,14 +611,15 @@ public:
 
   Pose getPose() const { return pose; }
 
+  // Get GPS data for logging (even if not used for correction)
   Pose getGPSPose() const {
     Pose gpsPose = pose;
     if (sensorConfig.useGPS) {
       gps_status_s_t status = gps.get_position_and_orientation();
       if (status.x != PROS_ERR_F)
-        gpsPose.x = status.x;
+        gpsPose.x = status.x; // Already inches
       if (status.y != PROS_ERR_F)
-        gpsPose.y = status.y;
+        gpsPose.y = status.y; // Already inches
       if (status.yaw != PROS_ERR_F)
         gpsPose.theta = status.yaw * M_PI / 180.0;
     }
@@ -440,6 +629,9 @@ public:
 
 Odometry odom;
 
+// ============================================================================
+// PATH RECORDING
+// ============================================================================
 std::vector<Waypoint> recordedPath;
 bool isRecording = false;
 
@@ -493,8 +685,8 @@ void recordWaypoint(int16_t intake_cmd, int16_t middle_cmd, int16_t top_cmd) {
   Pose current = odom.getPose();
 
   Waypoint wp;
-  wp.x = current.x;
-  wp.y = current.y;
+  wp.x = current.x; // In inches
+  wp.y = current.y; // In inches
   wp.theta = current.theta;
   wp.timestamp = current.timestamp;
   wp.intake_cmd = intake_cmd;
@@ -504,6 +696,9 @@ void recordWaypoint(int16_t intake_cmd, int16_t middle_cmd, int16_t top_cmd) {
   recordedPath.push_back(wp);
 }
 
+// ============================================================================
+// PURE PURSUIT ALGORITHM
+// ============================================================================
 struct LookaheadPoint {
   double x;
   double y;
@@ -552,6 +747,7 @@ LookaheadPoint findLookaheadPoint(const std::vector<Waypoint> &path,
     }
   }
 
+  // If no intersection, use the last point
   if (path.size() > 0) {
     result.x = path.back().x;
     result.y = path.back().y;
@@ -574,25 +770,33 @@ MotorCommands calculatePurePursuit(const Pose &robot,
   double angleToTarget = atan2(dy, dx);
   double angleError = angleToTarget - robot.theta;
 
+  // Normalize angle to [-pi, pi]
   while (angleError > M_PI)
     angleError -= 2 * M_PI;
   while (angleError < -M_PI)
     angleError += 2 * M_PI;
 
+  // Calculate curvature
   double distance = sqrt(dx * dx + dy * dy);
   double curvature = (2 * sin(angleError)) / LOOKAHEAD_DISTANCE;
 
+  // Base speed (can be adjusted)
   int baseSpeed = 80;
 
+  // Calculate differential steering
   double leftSpeed = baseSpeed * (1 + curvature * TRACK_WIDTH / 2.0);
   double rightSpeed = baseSpeed * (1 - curvature * TRACK_WIDTH / 2.0);
 
+  // Clamp to [-127, 127]
   leftSpeed = std::max(-127.0, std::min(127.0, leftSpeed));
   rightSpeed = std::max(-127.0, std::min(127.0, rightSpeed));
 
   return {(int)leftSpeed, (int)rightSpeed};
 }
 
+// ============================================================================
+// MECHANISM CONTROL TASK
+// ============================================================================
 void ballTask() {
   while (true) {
     intake.move(userInput.get_digital(DIGITAL_R2)   ? -127
@@ -615,13 +819,18 @@ void ballTask() {
   }
 }
 
+// ============================================================================
+// AUTONOMOUS MODE
+// ============================================================================
 void autonomous() {
+  gps.set_data_rate(5);
   std::vector<Waypoint> path = loadPathFromSD("/usd/path.dat");
   if (path.empty()) {
     userInput.print(0, 0, "No path!");
     return;
   }
 
+  // Load MCL training data if using MCL
   if (sensorConfig.useMCL) {
     mcl.loadTrainingData("/usd/mcl_params.txt");
   }
@@ -635,16 +844,19 @@ void autonomous() {
     odom.update();
     Pose robot = odom.getPose();
 
+    // Find lookahead point
     LookaheadPoint target = findLookaheadPoint(path, robot, lastIndex);
 
     if (!target.found)
       break;
 
+    // Calculate motor commands
     MotorCommands cmd = calculatePurePursuit(robot, target);
 
     aleft.move(cmd.left);
     aright.move(cmd.right);
 
+    // Execute mechanism commands based on current waypoint timing
     uint32_t elapsed = millis() - startTime;
     for (const auto &wp : path) {
       if (abs((int)(elapsed - wp.timestamp)) < 100) {
@@ -655,6 +867,7 @@ void autonomous() {
       }
     }
 
+    // Check if we've reached the end
     double distToEnd =
         sqrt(pow(path.back().x - robot.x, 2) + pow(path.back().y - robot.y, 2));
     if (distToEnd < 3.0)
@@ -670,11 +883,14 @@ void autonomous() {
   top.brake();
 }
 
+// ============================================================================
+// OPERATOR CONTROL MODE
+// ============================================================================
 void opcontrol() {
-  userInput.clear();
-
   Task balls(ballTask);
+  gps.set_data_rate(5);
 
+  // Initialize sensors
   if (sensorConfig.useIMU) {
     inertial1.reset();
     inertial2.reset();
@@ -683,21 +899,28 @@ void opcontrol() {
     leftEncoder.reset_position();
     rightEncoder.reset_position();
   }
-  gps.set_data_rate(5);
+
+  // Load MCL parameters if using MCL
+  if (sensorConfig.useMCL) {
+    mcl.loadTrainingData("/usd/mcl_params.txt");
+  }
 
   odom.reset();
 
   uint32_t lastRecordTime = 0;
 
   while (true) {
+    // Update odometry
     odom.update();
 
+    // Manual drive control
     int16_t fwd = userInput.get_analog(ANALOG_LEFT_Y);
     int16_t trn = userInput.get_analog(ANALOG_RIGHT_X) * 0.6;
 
     aleft.move(fwd + trn);
     aright.move(fwd - trn);
 
+    // Get current mechanism commands
     int16_t intake_cmd = userInput.get_digital(DIGITAL_R2)   ? -127
                          : userInput.get_digital(DIGITAL_R1) ? 127
                                                              : 0;
@@ -714,6 +937,7 @@ void opcontrol() {
                           ? -127
                           : 0;
 
+    // Recording controls
     if (userInput.get_digital_new_press(DIGITAL_X)) {
       startRecording();
     }
@@ -722,21 +946,18 @@ void opcontrol() {
       stopRecording();
     }
 
+    // Record waypoint at intervals (in INCHES)
     if (isRecording && millis() - lastRecordTime >= RECORD_INTERVAL_MS) {
       recordWaypoint(intake_cmd, middle_cmd, top_cmd);
       lastRecordTime = millis();
     }
 
+    // Pneumatics toggle
     if (userInput.get_digital_new_press(DIGITAL_A)) {
       match.toggle();
     }
 
-    if (userInput.get_digital_new_press(DIGITAL_UP)) {
-      mcl.saveTrainingData("/usd/mcl_params.txt");
-      userInput.print(0, 0, "MCL saved!");
-      delay(1000);
-    }
-
+    // Display current pose on controller (in INCHES)
     Pose current = odom.getPose();
     userInput.print(0, 0, "X:%.1f Y:%.1f", current.x, current.y);
     userInput.print(1, 0, "Theta:%.1f", current.theta * 180.0 / M_PI);
