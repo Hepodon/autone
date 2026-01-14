@@ -6,6 +6,7 @@
 #include "pros/motor_group.hpp"
 #include "pros/rotation.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -18,21 +19,21 @@ using namespace pros;
 // ============================================================================
 // HARDWARE CONFIGURATION
 // ============================================================================
-MotorGroup aright({-7, 5, 10});
-MotorGroup aleft({19, -21, -6});
-Motor intake(18);
-Motor middle(3);
-Motor top(4);
+MotorGroup aright({-19, 13, 14});
+MotorGroup aleft({9, -3, -4});
+Motor intake(20);
+Motor middle(20);
+Motor top(20);
 
 Controller userInput(E_CONTROLLER_MASTER);
 adi::Pneumatics match('a', false);
 
 // Sensors (configure ports as needed)
-IMU inertial1(11);         // Primary IMU
-IMU inertial2(20);         // Secondary IMU
-GPS gps(12);               // GPS port (in INCHES mode)
-Rotation leftEncoder(13);  // Left tracking wheel
-Rotation rightEncoder(14); // Right tracking wheel
+IMU inertial1(7);          // Primary IMU
+IMU inertial2(6);          // Secondary IMU
+GPS gps(15);               // GPS port (in INCHES mode)
+Rotation leftEncoder(1);   // Left tracking wheel
+Rotation rightEncoder(11); // Right tracking wheel
 
 // ============================================================================
 // CONFIGURATION FLAGS
@@ -99,6 +100,28 @@ struct Particle {
   double theta;
   double weight;
 };
+
+uint32_t recordStartTime = 0;
+double lastLeftCmd = 0;
+double lastRightCmd = 0;
+int leftPower = 0;
+int rightPower = 0;
+const double MAX_ACCEL = 6; // power units per loop
+
+double slewLimit(double target, double last, double maxDelta) {
+  if (target > last + maxDelta)
+    return last + maxDelta;
+  if (target < last - maxDelta)
+    return last - maxDelta;
+  return target;
+}
+
+double flipHeadingDeg(double h) {
+  h = fmod(360.0 - h, 360.0);
+  if (h < 0)
+    h += 360.0;
+  return h;
+}
 
 class MonteCarloLocalizer {
 private:
@@ -489,7 +512,6 @@ private:
   double lastLeftPos;
   double lastRightPos;
 
-  // Dual IMU fusion
   double getAveragedHeading() {
     if (!sensorConfig.useIMU)
       return pose.theta;
@@ -497,27 +519,27 @@ private:
     double heading1 = inertial1.get_heading();
     double heading2 = inertial2.get_heading();
 
-    // Check if both IMUs are valid
+    // Check validity
     if (heading1 == PROS_ERR_F && heading2 == PROS_ERR_F) {
-      return pose.theta; // Keep previous
+      return pose.theta;
     } else if (heading1 == PROS_ERR_F) {
+      heading2 = flipHeadingDeg(heading2);
       return heading2 * M_PI / 180.0;
     } else if (heading2 == PROS_ERR_F) {
       return heading1 * M_PI / 180.0;
     }
 
-    // Average both IMUs (convert to radians)
-    heading1 = heading1 * M_PI / 180.0;
-    heading2 = heading2 * M_PI / 180.0;
+    heading2 = flipHeadingDeg(heading2);
 
-    // Handle angle wrapping
-    double diff = heading2 - heading1;
-    while (diff > M_PI)
-      diff -= 2 * M_PI;
-    while (diff < -M_PI)
-      diff += 2 * M_PI;
+    // Convert to radians
+    double h1 = heading1 * M_PI / 180.0;
+    double h2 = heading2 * M_PI / 180.0;
 
-    return heading1 + diff / 2.0;
+    // ✅ Circular mean (wrap-safe)
+    double x = cos(h1) + cos(h2);
+    double y = sin(h1) + sin(h2);
+
+    return atan2(y, x);
   }
 
 public:
@@ -526,8 +548,9 @@ public:
   void reset(double x = 0, double y = 0, double theta = 0) {
     pose = {x, y, theta, millis()};
     if (sensorConfig.useEncoders) {
-      lastLeftPos = leftEncoder.get_position() / 100.0 * WHEEL_CIRCUMFERENCE;
-      lastRightPos = rightEncoder.get_position() / 100.0 * WHEEL_CIRCUMFERENCE;
+      lastLeftPos = leftEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
+      lastRightPos =
+          rightEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
     }
 
     if (sensorConfig.useMCL) {
@@ -538,17 +561,18 @@ public:
   void update() {
     double deltaX = 0, deltaY = 0, deltaTheta = 0;
     double currentTheta = pose.theta;
+    bool imuValid = !inertial1.is_calibrating() && !inertial2.is_calibrating();
 
-    // Update heading from dual IMU if enabled
-    if (sensorConfig.useIMU) {
+    if (sensorConfig.useIMU && imuValid) {
       currentTheta = getAveragedHeading();
     }
 
     // Update position from encoders if enabled (in INCHES)
     if (sensorConfig.useEncoders) {
-      double leftPos = leftEncoder.get_position() / 100.0 * WHEEL_CIRCUMFERENCE;
+      double leftPos =
+          leftEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
       double rightPos =
-          rightEncoder.get_position() / 100.0 * WHEEL_CIRCUMFERENCE;
+          rightEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
 
       double deltaLeft = leftPos - lastLeftPos;
       double deltaRight = rightPos - lastRightPos;
@@ -580,9 +604,9 @@ public:
       // Update with sensor measurements
       gps_status_s_t gpsStatus = gps.get_position_and_orientation();
       double gpsX =
-          gpsStatus.x; // Already in inches if GPS configured correctly
-      double gpsY = gpsStatus.y; // Already in inches
-      double imuTheta = currentTheta;
+          gpsStatus.x / 25.4; // Already in inches if GPS configured correctly
+      double gpsY = gpsStatus.y / 25.4; // Already in inches
+      double imuTheta = gpsStatus.yaw * M_PI / 180;
 
       mcl.update(gpsX, gpsY, imuTheta, sensorConfig.useGPS,
                  sensorConfig.useIMU);
@@ -598,10 +622,14 @@ public:
       gps_status_s_t status = gps.get_position_and_orientation();
       if (status.x != PROS_ERR_F && status.y != PROS_ERR_F) {
         // GPS should already be in inches - verify configuration!
-        double gpsX = status.x;
-        double gpsY = status.y;
-        pose.x = pose.x * 0.9 + gpsX * 0.1;
-        pose.y = pose.y * 0.9 + gpsY * 0.1;
+        double gpsX = status.x / 25.4;
+        double gpsY = status.y / 25.4;
+        double speed = fabs(deltaX) + fabs(deltaY);
+
+        if (speed < 0.5) { // inches per update
+          pose.x = pose.x * 0.9 + gpsX * 0.1;
+          pose.y = pose.y * 0.9 + gpsY * 0.1;
+        }
       }
     }
 
@@ -617,9 +645,9 @@ public:
     if (sensorConfig.useGPS) {
       gps_status_s_t status = gps.get_position_and_orientation();
       if (status.x != PROS_ERR_F)
-        gpsPose.x = status.x; // Already inches
+        gpsPose.x = status.x / 25.4; // Already inches
       if (status.y != PROS_ERR_F)
-        gpsPose.y = status.y; // Already inches
+        gpsPose.y = status.y / 25.4; // Already inches
       if (status.yaw != PROS_ERR_F)
         gpsPose.theta = status.yaw * M_PI / 180.0;
     }
@@ -668,6 +696,7 @@ std::vector<Waypoint> loadPathFromSD(const char *filename) {
 
 void startRecording() {
   recordedPath.clear();
+  recordStartTime = millis();
   isRecording = true;
   odom.reset(0, 0, 0);
   userInput.print(0, 0, "Recording...");
@@ -688,7 +717,7 @@ void recordWaypoint(int16_t intake_cmd, int16_t middle_cmd, int16_t top_cmd) {
   wp.x = current.x; // In inches
   wp.y = current.y; // In inches
   wp.theta = current.theta;
-  wp.timestamp = current.timestamp;
+  wp.timestamp = millis() - recordStartTime;
   wp.intake_cmd = intake_cmd;
   wp.middle_cmd = middle_cmd;
   wp.top_cmd = top_cmd;
@@ -779,6 +808,7 @@ MotorCommands calculatePurePursuit(const Pose &robot,
   // Calculate curvature
   double distance = sqrt(dx * dx + dy * dy);
   double curvature = (2 * sin(angleError)) / LOOKAHEAD_DISTANCE;
+  curvature = std::clamp(curvature, -0.5, 0.5);
 
   // Base speed (can be adjusted)
   int baseSpeed = 80;
@@ -850,11 +880,16 @@ void autonomous() {
     if (!target.found)
       break;
 
-    // Calculate motor commands
     MotorCommands cmd = calculatePurePursuit(robot, target);
 
-    aleft.move(cmd.left);
-    aright.move(cmd.right);
+    leftPower = slewLimit(cmd.left, lastLeftCmd, MAX_ACCEL);
+    rightPower = slewLimit(cmd.right, lastRightCmd, MAX_ACCEL);
+
+    aleft.move(leftPower);
+    aright.move(rightPower);
+
+    lastLeftCmd = leftPower;
+    lastRightCmd = rightPower;
 
     // Execute mechanism commands based on current waypoint timing
     uint32_t elapsed = millis() - startTime;
@@ -870,7 +905,7 @@ void autonomous() {
     // Check if we've reached the end
     double distToEnd =
         sqrt(pow(path.back().x - robot.x, 2) + pow(path.back().y - robot.y, 2));
-    if (distToEnd < 3.0)
+    if (distToEnd < 3.0 && lastIndex >= path.size() - 2)
       break;
 
     delay(10);
@@ -917,8 +952,14 @@ void opcontrol() {
     int16_t fwd = userInput.get_analog(ANALOG_LEFT_Y);
     int16_t trn = userInput.get_analog(ANALOG_RIGHT_X) * 0.6;
 
-    aleft.move(fwd + trn);
-    aright.move(fwd - trn);
+    leftPower = slewLimit(fwd + trn, lastLeftCmd, MAX_ACCEL);
+    rightPower = slewLimit(fwd - trn, lastRightCmd, MAX_ACCEL);
+
+    aleft.move(leftPower);
+    aright.move(rightPower);
+
+    lastLeftCmd = leftPower;
+    lastRightCmd = rightPower;
 
     // Get current mechanism commands
     int16_t intake_cmd = userInput.get_digital(DIGITAL_R2)   ? -127
