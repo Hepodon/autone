@@ -18,10 +18,10 @@ using namespace pros;
 
 // ============================================================================
 // HARDWARE CONFIGURATION
-// ============================================================================
-MotorGroup aright({-19, 13, 14});
+// ===========================================================================
+pros::MotorGroup aright({-19, 13, 14});
 MotorGroup aleft({9, -3, -4});
-Motor intake(20);
+Motor intake(-10);
 Motor middle(20);
 Motor top(20);
 
@@ -29,21 +29,21 @@ Controller userInput(E_CONTROLLER_MASTER);
 adi::Pneumatics match('a', false);
 
 // Sensors (configure ports as needed)
-IMU inertial1(7);          // Primary IMU
-IMU inertial2(6);          // Secondary IMU
-GPS gps(15);               // GPS port (in INCHES mode)
-Rotation leftEncoder(1);   // Left tracking wheel
-Rotation rightEncoder(11); // Right tracking wheel
+IMU inertial1(7);           // Primary IMU
+IMU inertial2(6);           // Secondary IMU
+GPS gps(15);                // GPS port (in INCHES mode)
+Rotation leftEncoder(1);    // Left tracking wheel
+Rotation rightEncoder(-11); // Right tracking wheel
 
 // ============================================================================
 // CONFIGURATION FLAGS
 // ============================================================================
 struct SensorConfig {
-  bool useGPS = true;
+  bool useGPS = false;
   bool useEncoders = true;
   bool useIMU = true;
-  bool useMCL = false;          // Monte Carlo Localization
-  bool gpsForCorrection = true; // true = correction, false = logging only
+  bool useMCL = false;           // Monte Carlo Localization
+  bool gpsForCorrection = false; // true = correction, false = logging onlyz
 };
 
 SensorConfig sensorConfig;
@@ -51,15 +51,15 @@ SensorConfig sensorConfig;
 // ============================================================================
 // CONSTANTS
 // ============================================================================
-constexpr double WHEEL_DIAMETER = 2.75; // inches
+constexpr double WHEEL_DIAMETER = 2; // inches
 constexpr double WHEEL_CIRCUMFERENCE = WHEEL_DIAMETER * M_PI;
-constexpr double TRACK_WIDTH = 12.0;        // inches between wheels
-constexpr double LOOKAHEAD_DISTANCE = 12.0; // inches
+constexpr double TRACK_WIDTH = 12.72;        // inches between wheels
+constexpr double LOOKAHEAD_DISTANCE = 8.0; // inches
 constexpr int MAX_WAYPOINTS = 5000;
-constexpr uint32_t RECORD_INTERVAL_MS = 50; // Record every 50ms
+constexpr uint32_t RECORD_INTERVAL_MS = 100; // Record every 50ms
 
 // MCL Constants
-constexpr int NUM_PARTICLES = 500;
+constexpr int NUM_PARTICLES = 100;
 constexpr double FIELD_WIDTH = 144.0;  // 12 feet in inches
 constexpr double FIELD_HEIGHT = 144.0; // 12 feet in inches
 
