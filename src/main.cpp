@@ -578,9 +578,12 @@ public:
       double deltaRight = rightPos - lastRightPos;
 
       double deltaCenter = (deltaLeft + deltaRight) / 2.0;
-      deltaTheta = (deltaRight - deltaLeft) / TRACK_WIDTH;
 
-      double avgTheta = currentTheta + deltaTheta / 2.0;
+      // If IMU is enabled, ignore encoder heading
+      double avgTheta;
+      if (sensorConfig.useIMU && imuValid) {
+        avgTheta = currentTheta;
+      }
 
       deltaX = deltaCenter * cos(avgTheta);
       deltaY = deltaCenter * sin(avgTheta);
