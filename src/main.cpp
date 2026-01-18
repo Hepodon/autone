@@ -934,6 +934,8 @@ void opcontrol() {
   Task balls(ballTask);
   gps.set_data_rate(5);
 
+  uint32_t lastPrint = 0;
+
   // Initialize sensors
   if (sensorConfig.useIMU) {
     inertial1.reset();
@@ -1013,8 +1015,11 @@ void opcontrol() {
 
     // Display current pose on controller (in INCHES)
     Pose current = odom.getPose();
-    userInput.print(0, 0, "X:%.1f Y:%.1f", current.x, current.y);
-    userInput.print(1, 0, "Theta:%.1f", current.theta * 180.0 / M_PI);
+    if (millis() - lastPrint > 200) { // 5 Hz
+      userInput.print(0, 0, "X:%.1f Y:%.1f, T:%.1f", current.x, current.y,
+                      current.theta * 180.0 / M_PI);
+      lastPrint = millis();
+    }
 
     delay(10);
   }
