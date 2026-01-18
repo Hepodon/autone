@@ -34,6 +34,7 @@ IMU inertial2(6);          // Secondary IMU
 GPS gps(15);               // GPS port (in INCHES mode)
 Rotation leftEncoder(1);   // Left tracking wheel
 Rotation rightEncoder(11); // Right tracking wheel
+Rotation perpEncoder(2);   // Perpendicular tracking wheel
 
 // ============================================================================
 // CONFIGURATION FLAGS
@@ -511,6 +512,7 @@ private:
   Pose pose;
   double lastLeftPos;
   double lastRightPos;
+  double lastPerpPos;
 
   double getAveragedHeading() {
     if (!sensorConfig.useIMU)
@@ -551,6 +553,7 @@ public:
       lastLeftPos = leftEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
       lastRightPos =
           rightEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
+      lastPerpPos = perpEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
     }
 
     if (sensorConfig.useMCL) {
@@ -573,27 +576,27 @@ public:
           leftEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
       double rightPos =
           rightEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
+      double perpPos =
+          perpEncoder.get_position() / 36000.0 * WHEEL_CIRCUMFERENCE;
 
-      double deltaLeft = leftPos - lastLeftPos;
-      double deltaRight = rightPos - lastRightPos;
+      double dL = leftPos - lastLeftPos;
+      double dR = rightPos - lastRightPos;
+      double dP = perpPos - lastPerpPos;
 
-      double deltaCenter = (deltaLeft + deltaRight) / 2.0;
+      lastLeftPos = leftPos;
+      lastRightPos = rightPos;
+      lastPerpPos = perpPos;
 
-      // If IMU is enabled, ignore encoder heading
-      double avgTheta;
-      if (sensorConfig.useIMU && imuValid) {
-        avgTheta = currentTheta;
-      }
+      // Local robot-frame movement
+      double dForward = (dL + dR) / 2.0;
+      double dStrafe = dP;
 
-      deltaX = deltaCenter * cos(avgTheta);
-      deltaY = deltaCenter * sin(avgTheta);
+      // Rotate into global frame using IMU heading
+      double cosH = cos(currentTheta);
+      double sinH = sin(currentTheta);
 
-      pose.x += deltaX;
-      pose.y += deltaY;
-
-      if (!sensorConfig.useIMU) {
-        currentTheta += deltaTheta;
-      }
+      pose.x += dForward * cosH - dStrafe * sinH;
+      pose.y += dForward * sinH + dStrafe * cosH;
 
       lastLeftPos = leftPos;
       lastRightPos = rightPos;
@@ -869,6 +872,9 @@ void autonomous() {
   }
 
   odom.reset(path[0].x, path[0].y, path[0].theta);
+  while (inertial1.is_calibrating() || inertial2.is_calibrating()) {
+    delay(10);
+  }
 
   int lastIndex = 0;
   uint32_t startTime = millis();
@@ -933,6 +939,10 @@ void opcontrol() {
     inertial1.reset();
     inertial2.reset();
   }
+  while (inertial1.is_calibrating() || inertial2.is_calibrating()) {
+    delay(10);
+  }
+
   if (sensorConfig.useEncoders) {
     leftEncoder.reset_position();
     rightEncoder.reset_position();
