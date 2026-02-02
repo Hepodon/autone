@@ -3,6 +3,7 @@
 #include "lemlib/chassis/trackingWheel.hpp"
 #include "pros/abstract_motor.hpp"
 #include "pros/adi.hpp"
+#include "pros/misc.h"
 #include "pros/motor_group.hpp"
 
 pros::MotorGroup aleft({9, -3, -4}, pros::MotorGearset::blue,
@@ -15,20 +16,17 @@ pros::Motor middle(-10);
 pros::Motor top(16);
 
 pros::adi::Pneumatics match('a', false);
+pros::adi::Pneumatics arm('b', false);
+pros::adi::Pneumatics middlePneu('c', false);
 
-lemlib::Drivetrain DT(&aleft, &aright, 12.72, lemlib::Omniwheel::NEW_325, 800,
+lemlib::Drivetrain DT(&aleft, &aright, 12.72, lemlib::Omniwheel::NEW_325, 480,
                       2);
 
 pros::IMU inertial1(20);
 
-pros::Rotation leftVertEnd(1);
-pros::Rotation horiEnd(21);
-
-lemlib::TrackingWheel vert(&leftVertEnd, lemlib::Omniwheel::NEW_2, -3.0 / 8.0,
-                           1);
-lemlib::TrackingWheel hor(&horiEnd, lemlib::Omniwheel::NEW_2, 1);
-
 lemlib::OdomSensors sensors(nullptr, nullptr, nullptr, nullptr, &inertial1);
+
+int startTime;
 
 // lateral PID controller
 lemlib::ControllerSettings
@@ -69,7 +67,18 @@ pros::Controller userInput(pros::E_CONTROLLER_MASTER);
 void initialize() {
   pros::lcd::initialize(); // initialize brain screen
   chassis.calibrate();     // calibrate sensors
+  startTime = pros::millis();
   // print position to brain screen
+  pros::Task screen_task([&]() {
+    while (true) {
+      // print robot location to the brain screen
+      pros::lcd::print(0, "X: %f", chassis.getPose().x);         // x
+      pros::lcd::print(1, "Y: %f", chassis.getPose().y);         // y
+      pros::lcd::print(2, "Theta: %f", chassis.getPose().theta); // heading
+      // delay to save resources
+      pros::delay(20);
+    }
+  });
 }
 
 /**
@@ -101,7 +110,23 @@ void competition_initialize() {}
  * will be stopped. Re-enabling the robot will restart the task, not re-start it
  * from where it left off.
  */
-void autonomous() {}
+void autonomous() {
+  match.set_value(true);
+  chassis.moveToPoint(0, 28, 1000);
+  chassis.turnToHeading(-90, 1000);
+  chassis.moveToPoint(-18, 28, 1000);
+  middle.move(-127);
+  top.move(-100);
+  pros::delay(1000);
+  chassis.moveToPoint(24, 28, 1000);
+  top.move(127);
+  match.set_value(false);
+  pros::delay(1000);
+  top.move(-100);
+  chassis.moveToPoint(10, -30, 1500);
+  chassis.turnToHeading(-135, 500);
+  middlePneu.set_value(true);
+}
 
 /**
  * Runs the operator control code. This function will be started in its own task
@@ -116,50 +141,40 @@ void autonomous() {}
  * operator control task will be stopped. Re-enabling the robot will restart the
  * task, not resume it from where it left off.
  */
+
 void opcontrol() {
-  pros::Task screen_task([&]() {
-    while (true) {
-      // print robot location to the brain screen
-      pros::lcd::print(0, "X: %f", chassis.getPose().x);         // x
-      pros::lcd::print(1, "Y: %f", chassis.getPose().y);         // y
-      pros::lcd::print(2, "Theta: %f", chassis.getPose().theta); // heading
-      // delay to save resources
-      pros::delay(20);
-    }
-  });
-  pros::Task ball_task([&]() {
-    while (true) {
-      intake.move(userInput.get_digital(DIGITAL_R2)   ? -127
-                  : userInput.get_digital(DIGITAL_R1) ? 127
-                                                      : 0);
+  bool recordButtonPressed = false;
+  bool saveButtonPressed = false;
 
-      middle.move(userInput.get_digital(DIGITAL_L1) ||
-                          userInput.get_digital(DIGITAL_L2)
-                      ? -127
-                  : userInput.get_digital(DIGITAL_R1) ? 127
-                                                      : 0);
-
-      top.move(userInput.get_digital(DIGITAL_L1)   ? 127
-               : userInput.get_digital(DIGITAL_R1) ? -127
-                                                   : 0);
-
-      if (userInput.get_digital_new_press(DIGITAL_A)) {
-        match.toggle();
-      }
-
-      pros::delay(10);
-    }
-  });
-  // loop forever
   while (true) {
-    // get left y and right x positions
     int leftY = userInput.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
     int rightX = userInput.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
 
-    // move the robot
     chassis.arcade(leftY, rightX, true, 0.40);
 
-    // delay to save resources
-    pros::delay(15);
+    middle.move(userInput.get_digital(DIGITAL_L1) ||
+                        userInput.get_digital(DIGITAL_L2)
+                    ? -127
+                : userInput.get_digital(DIGITAL_DOWN) ? 127
+                                                      : 0);
+
+    top.move(userInput.get_digital(DIGITAL_L1) ? 127
+             : userInput.get_digital(DIGITAL_DOWN) ||
+                     userInput.get_digital(DIGITAL_L2)
+                 ? -127
+                 : 0);
+
+    // Pneumatics toggle
+    if (userInput.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R2)) {
+      match.toggle();
+    }
+    if (userInput.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1)) {
+      arm.toggle();
+    }
+    if (userInput.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)) {
+      middlePneu.toggle();
+    }
+
+    pros::delay(10); // 10ms delay = 100 frames per second
   }
 }
